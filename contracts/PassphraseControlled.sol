@@ -24,7 +24,7 @@ contract PassphraseControlled {
         bytes32 provisionalPassphraseHash
     );
 
-    /// @notice logs when the unlockPeriod is updated
+    /// @notice logs when the account is unlocked
     /// @param newController address of the new controller
     /// @param newHint the new hint to apply when account goes back to being locked
     /// @param newPassphraseHash the new passphraseHash to apply when account goes back to being locked
