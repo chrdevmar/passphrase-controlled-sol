@@ -1,8 +1,6 @@
 //SPDX-License-Identifier: Unlicense
 pragma solidity ^0.8.0;
 
-import "hardhat/console.sol";
-
 contract PassphraseControlled {
     string public name;
     uint256 public lockedAt;
@@ -16,18 +14,30 @@ contract PassphraseControlled {
     bytes32 public provisionalPassphraseHash;
     address public provisionalController;
 
+    /// @notice logs when the account is provisionally unlocked
+    /// @param provisionalController address of the new provisional controller
+    /// @param provisionalHint the proposed new hint to apply when account goes back to being locked
+    /// @param provisionalPassphraseHash the proposed new passphraseHash to apply when account goes back to being locked
     event ProvisionallyUnlocked(
         address provisionalController,
         string provisionalHint,
         bytes32 provisionalPassphraseHash
     );
 
+    /// @notice logs when the unlockPeriod is updated
+    /// @param newController address of the new controller
+    /// @param newHint the new hint to apply when account goes back to being locked
+    /// @param newPassphraseHash the new passphraseHash to apply when account goes back to being locked
+    /// @param lockedAt the block number at which the account will go back to being locked
     event Unlocked(
         address newController,
         string newHint,
-        bytes32 newPassphraseHash
+        bytes32 newPassphraseHash,
+        uint256 lockedAt
     );
 
+    /// @notice logs when the unlockPeriod is updated
+    /// @param unlockPeriod the new value of unlockPeriod
     event UnlockPeriodUpdated(
         uint256 unlockPeriod
     );
@@ -50,6 +60,14 @@ contract PassphraseControlled {
 
     receive() external payable {}
 
+    /// Provisionally unlock the account.
+    /// @param _provisionalHint the new hint to apply after account is unlocked
+    /// @param _provisionalPassphraseHash the new passphrase hash output to apply after account is unlocked
+    /// @dev sets the caller as the provisional controller
+    /// @dev provisionalHint and provisionalPassphraseHash only come into effect if the account is unlocked while these
+    ///      are the provisional hint and passphrase hash
+    /// @dev emits ProvisionallyUnlocked event
+    /// @dev emits ProvisionallyUnlocked event
     function provisionalUnlock(
         string memory _provisionalHint,
         bytes32 _provisionalPassphraseHash
@@ -62,19 +80,34 @@ contract PassphraseControlled {
         emit ProvisionallyUnlocked(msg.sender, _provisionalHint, _provisionalPassphraseHash);
     }
 
+    /// Unlock the account
+    /// This can only be called by the provisional controller
+    /// @param _passphrase the input which when hashed will match the current passphraseHash
+    /// @dev sets the provisionalController as the controller
+    /// @dev unlocks the account for <unlockPeriod> blocks
+    /// @dev emits Unlocked event
     function unlock(
         string memory _passphrase
     ) public onlyLocked {
         require(keccak256(abi.encodePacked(_passphrase)) == passphraseHash, "Incorrect passphrase");
         require(provisionalController == msg.sender, "Not provisional controller");
-        lockedAt = block.number + unlockPeriod;
+        uint256 _lockedAt = block.number + unlockPeriod;
+
+        lockedAt = _lockedAt;
         controller = provisionalController;
         hint = provisionalHint;
         passphraseHash = provisionalPassphraseHash;
 
-        emit Unlocked(msg.sender, provisionalHint, provisionalPassphraseHash);
+        emit Unlocked(msg.sender, provisionalHint, provisionalPassphraseHash, _lockedAt);
     }
 
+    /// Execute arbitrary calls with arbitrary value from this contract address
+    /// @param _targets array of target addresses to call
+    /// @param _calldata array of encoded calldata to use
+    /// @param _values array of values to use in calls
+    /// @dev this can only be called by the controller while the account is unlocked
+    /// @dev this performs all calls atomically, if one fails the whole transaction will revert
+    /// @dev all input arrays must have matching lengths
     function execute(
         address[] memory _targets,
         bytes[] memory _calldata,
@@ -90,6 +123,10 @@ contract PassphraseControlled {
         }
     }
 
+    /// Set a new unlockPeriod
+    /// @param _unlockPeriod new unlockPeriod value
+    /// @dev this can only be called by the controller while the account is unlocked
+    /// @dev emits UnlockPeriodUpdated event
     function setUnlockPeriod(
         uint256 _unlockPeriod
     ) public onlyControllerUnlocked {

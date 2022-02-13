@@ -250,11 +250,25 @@ describe("PassphraseControlled", function () {
     it("Should emit an Unlocked event", async function () {
       const passphraseControlled = await getProvisionallyUnlockedContract();
 
-      const [signer] = await ethers.getSigners();
+      const [[signer], unlockPeriod] = await Promise.all([
+        ethers.getSigners(),
+        passphraseControlled.unlockPeriod(),
+      ]);
 
-      await expect(await passphraseControlled.unlock(_passphrase))
-        .to.emit(passphraseControlled, "Unlocked")
-        .withArgs(signer.address, _provisionalHint, _provisionalPassphraseHash);
+      const caughtCall = expect(await passphraseControlled.unlock(_passphrase));
+
+      const currentBlock = await ethers.provider.getBlockNumber();
+
+      const expectedLockedAt = currentBlock + unlockPeriod.toNumber();
+
+      await caughtCall.to
+        .emit(passphraseControlled, "Unlocked")
+        .withArgs(
+          signer.address,
+          _provisionalHint,
+          _provisionalPassphraseHash,
+          expectedLockedAt
+        );
     });
   });
 
