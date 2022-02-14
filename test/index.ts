@@ -13,6 +13,9 @@ const _passphraseHash = ethers.utils.keccak256(
   ethers.utils.toUtf8Bytes(_passphrase)
 );
 const _unlockPeriod = 10;
+const _provisionalLockPeriod = 10;
+const _provisionalUnlockDeposit = ethers.utils.parseEther("0.1");
+
 const _provisionalHint = "provisional hint";
 const _provisionalPassphraseHash = ethers.utils.keccak256(
   ethers.utils.toUtf8Bytes("new provisional passphrase hash")
@@ -25,7 +28,9 @@ async function getTestContract() {
     _name,
     _hint,
     _passphraseHash,
-    _unlockPeriod
+    _unlockPeriod,
+    _provisionalLockPeriod,
+    _provisionalUnlockDeposit
   );
 
   return passphraseControlled;
@@ -36,19 +41,15 @@ async function getProvisionallyUnlockedContract() {
 
   await passphraseControlled.provisionalUnlock(
     _provisionalHint,
-    _provisionalPassphraseHash
+    _provisionalPassphraseHash,
+    { value: _provisionalUnlockDeposit }
   );
 
   return passphraseControlled;
 }
 
 async function getUnlockedContract() {
-  const passphraseControlled = await getTestContract();
-
-  await passphraseControlled.provisionalUnlock(
-    _provisionalHint,
-    _provisionalPassphraseHash
-  );
+  const passphraseControlled = await getProvisionallyUnlockedContract();
 
   await passphraseControlled.unlock(_passphrase);
 
@@ -65,27 +66,30 @@ describe("PassphraseControlled", function () {
           "test passphrase owned account", // name
           "test hint", // hint
           ethers.utils.keccak256(ethers.utils.toUtf8Bytes("test passphrase")), // passphraseHash
-          0 // unlockPeriod
+          0, // unlockPeriod
+          0, // provisionalUnlockDeposit
+          0 // provisionalLockPeriod
         )
       ).to.be.revertedWith("Unlock period must be > 0");
     });
 
-    it("Should set all fields as expected", async function () {
+    it("Should revert if provisionalLockPeriod is 0", async function () {
       const PassphraseControlled = await getContractFactory();
 
-      const _name = "test passphrase owned account";
-      const _hint = "test hint";
-      const _passphraseHash = ethers.utils.keccak256(
-        ethers.utils.toUtf8Bytes("test passphrase")
-      );
-      const _unlockPeriod = 10;
+      await expect(
+        PassphraseControlled.deploy(
+          "test passphrase owned account", // name
+          "test hint", // hint
+          ethers.utils.keccak256(ethers.utils.toUtf8Bytes("test passphrase")), // passphraseHash
+          10, // unlockPeriod
+          0, // provisionalUnlockDeposit
+          0 // provisionalLockPeriod
+        )
+      ).to.be.revertedWith("Provisional lock period must be > 0");
+    });
 
-      const passphraseControlled = await PassphraseControlled.deploy(
-        _name,
-        _hint,
-        _passphraseHash,
-        _unlockPeriod
-      );
+    it("Should set all fields as expected", async function () {
+      const passphraseControlled = await getTestContract();
 
       const [
         name,
@@ -95,6 +99,9 @@ describe("PassphraseControlled", function () {
         controller,
         provisionalController,
         unlockPeriod,
+        provisionalUnlockDeposit,
+        provisionalLockPeriod,
+        provisionallyLockedUntil,
       ] = await Promise.all([
         passphraseControlled.name(),
         passphraseControlled.hint(),
@@ -103,6 +110,9 @@ describe("PassphraseControlled", function () {
         passphraseControlled.controller(),
         passphraseControlled.provisionalController(),
         passphraseControlled.unlockPeriod(),
+        passphraseControlled.provisionalUnlockDeposit(),
+        passphraseControlled.provisionalLockPeriod(),
+        passphraseControlled.provisionallyLockedUntil(),
       ]);
 
       const currentBlock = await ethers.provider.getBlockNumber();
@@ -111,11 +121,14 @@ describe("PassphraseControlled", function () {
       expect(hint).to.eql(_hint);
       expect(passphraseHash).to.eql(_passphraseHash);
       expect(lockedAt.toNumber()).to.eql(currentBlock);
+      expect(provisionallyLockedUntil.toNumber()).to.eql(currentBlock);
       expect(controller).to.eql("0x0000000000000000000000000000000000000000");
       expect(provisionalController).to.eql(
         "0x0000000000000000000000000000000000000000"
       );
       expect(unlockPeriod.toNumber()).to.eql(_unlockPeriod);
+      expect(provisionalLockPeriod.toNumber()).to.eql(_provisionalLockPeriod);
+      expect(provisionalUnlockDeposit).to.eql(_provisionalUnlockDeposit);
     });
   });
 
@@ -134,12 +147,49 @@ describe("PassphraseControlled", function () {
         )
       ).to.be.revertedWith("Account is unlocked");
     });
+
     it("Should revert if passphrase is not changing", async function () {
       const passphraseControlled = await getTestContract();
 
       await expect(
         passphraseControlled.provisionalUnlock(_hint, _passphraseHash)
       ).to.be.revertedWith("Provisional passphrase same as current passphrase");
+    });
+
+    it("Should revert if deposit not provided", async function () {
+      const passphraseControlled = await getTestContract();
+
+      await expect(
+        passphraseControlled.provisionalUnlock(
+          _hint,
+          _provisionalPassphraseHash,
+          {
+            value: 0,
+          }
+        )
+      ).to.be.revertedWith("Deposit required");
+    });
+
+    it("Should revert if provisionally unlocking within the provisional lock period", async function () {
+      const passphraseControlled = await getTestContract();
+
+      await passphraseControlled.provisionalUnlock(
+        _hint,
+        _provisionalPassphraseHash,
+        {
+          value: _provisionalUnlockDeposit,
+        }
+      );
+
+      await expect(
+        passphraseControlled.provisionalUnlock(
+          _hint,
+          _provisionalPassphraseHash,
+          {
+            value: _provisionalUnlockDeposit,
+          }
+        )
+      ).to.be.revertedWith("Provisionally locked");
     });
 
     it("Should set all fields as expected", async function () {
@@ -152,24 +202,36 @@ describe("PassphraseControlled", function () {
 
       await passphraseControlled.provisionalUnlock(
         _provisionalHint,
-        _provisionalPassphraseHash
+        _provisionalPassphraseHash,
+        {
+          value: _provisionalUnlockDeposit,
+        }
       );
+
+      const currentBlock = await ethers.provider.getBlockNumber();
 
       const [
         provisionalController,
         provisionalHint,
         provisionalPassphraseHash,
+        provisionalLockPeriod,
+        provisionallyLockedUntil,
         [signer],
       ] = await Promise.all([
         passphraseControlled.provisionalController(),
         passphraseControlled.provisionalHint(),
         passphraseControlled.provisionalPassphraseHash(),
+        passphraseControlled.provisionalLockPeriod(),
+        passphraseControlled.provisionallyLockedUntil(),
         ethers.getSigners(),
       ]);
 
       expect(provisionalController).to.eql(signer.address);
       expect(provisionalHint).to.eql(provisionalHint);
       expect(provisionalPassphraseHash).to.eql(provisionalPassphraseHash);
+      expect(provisionallyLockedUntil).to.eql(
+        provisionalLockPeriod.add(currentBlock)
+      );
     });
 
     it("Should emit ProvisionallyUnlocked event", async function () {
@@ -185,7 +247,10 @@ describe("PassphraseControlled", function () {
       await expect(
         passphraseControlled.provisionalUnlock(
           _provisionalHint,
-          _provisionalPassphraseHash
+          _provisionalPassphraseHash,
+          {
+            value: _provisionalUnlockDeposit,
+          }
         )
       )
         .to.emit(passphraseControlled, "ProvisionallyUnlocked")
@@ -321,6 +386,108 @@ describe("PassphraseControlled", function () {
       await expect(unlockedContract.setUnlockPeriod(_unlockPeriod))
         .to.emit(unlockedContract, "UnlockPeriodUpdated")
         .withArgs(_unlockPeriod);
+    });
+  });
+
+  context("setProvisionalLockPeriod", function () {
+    it("Should revert if account is locked", async function () {
+      const passphraseControlled = await getTestContract();
+
+      await expect(
+        passphraseControlled.setProvisionalLockPeriod(5)
+      ).to.be.revertedWith("Account is locked");
+    });
+
+    it("Should revert if caller is not controller", async function () {
+      const unlockedContract = await getUnlockedContract();
+
+      const [, otherAccount] = await ethers.getSigners();
+
+      const asOtherAccount = await unlockedContract.connect(otherAccount);
+
+      await expect(
+        asOtherAccount.setProvisionalLockPeriod(5)
+      ).to.be.revertedWith("Not controller");
+    });
+
+    it("Should revert if new provisional lock period is 0", async function () {
+      const unlockedContract = await getUnlockedContract();
+
+      await expect(
+        unlockedContract.setProvisionalLockPeriod(0)
+      ).to.be.revertedWith("Provisional lock period must be > 0");
+    });
+
+    it("Should set provisionalLockPeriod to new value", async function () {
+      const unlockedContract = await getUnlockedContract();
+
+      const _provisionalLockPeriod = 5;
+      await unlockedContract.setProvisionalLockPeriod(_provisionalLockPeriod);
+
+      const provisionalLockPeriod =
+        await unlockedContract.provisionalLockPeriod();
+
+      expect(provisionalLockPeriod.toNumber()).to.eql(_provisionalLockPeriod);
+    });
+
+    it("Should emit an ProvisionalLockPeriodUpdated event", async function () {
+      const unlockedContract = await getUnlockedContract();
+
+      const _provisionalLockPeriod = 5;
+      await unlockedContract.setProvisionalLockPeriod(_provisionalLockPeriod);
+
+      await expect(
+        unlockedContract.setProvisionalLockPeriod(_provisionalLockPeriod)
+      )
+        .to.emit(unlockedContract, "ProvisionalLockPeriodUpdated")
+        .withArgs(_provisionalLockPeriod);
+    });
+  });
+
+  context("setProvisionalUnlockDeposit", function () {
+    it("Should revert if account is locked", async function () {
+      const passphraseControlled = await getTestContract();
+
+      await expect(
+        passphraseControlled.setProvisionalUnlockDeposit(
+          ethers.utils.parseEther("5")
+        )
+      ).to.be.revertedWith("Account is locked");
+    });
+
+    it("Should revert if caller is not controller", async function () {
+      const unlockedContract = await getUnlockedContract();
+
+      const [, otherAccount] = await ethers.getSigners();
+
+      const asOtherAccount = await unlockedContract.connect(otherAccount);
+
+      await expect(
+        asOtherAccount.setProvisionalUnlockDeposit(ethers.utils.parseEther("5"))
+      ).to.be.revertedWith("Not controller");
+    });
+
+    it("Should set provisionalUnlockDeposit to new value", async function () {
+      const unlockedContract = await getUnlockedContract();
+
+      const depositAmount = ethers.utils.parseEther("5");
+      await unlockedContract.setProvisionalUnlockDeposit(depositAmount);
+
+      const provisionalUnlockDeposit =
+        await unlockedContract.provisionalUnlockDeposit();
+
+      expect(provisionalUnlockDeposit).to.eql(depositAmount);
+    });
+
+    it("Should emit ProvisionalUnlockDepositUpdated event", async function () {
+      const unlockedContract = await getUnlockedContract();
+
+      const depositAmount = ethers.utils.parseEther("5");
+      await unlockedContract.setProvisionalUnlockDeposit(depositAmount);
+
+      await expect(unlockedContract.setProvisionalUnlockDeposit(depositAmount))
+        .to.emit(unlockedContract, "ProvisionalUnlockDepositUpdated")
+        .withArgs(depositAmount);
     });
   });
 

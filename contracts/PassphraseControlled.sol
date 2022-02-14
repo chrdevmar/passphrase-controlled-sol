@@ -5,6 +5,7 @@ contract PassphraseControlled {
     string public name;
     uint256 public lockedAt;
     uint256 public unlockPeriod;
+    uint256 public provisionallyLockedUntil;
 
     string public hint;
     bytes32 public passphraseHash;
@@ -13,6 +14,8 @@ contract PassphraseControlled {
     string public provisionalHint;
     bytes32 public provisionalPassphraseHash;
     address public provisionalController;
+    uint256 public provisionalUnlockDeposit;
+    uint256 public provisionalLockPeriod;
 
     /// @notice logs when the account is provisionally unlocked
     /// @param provisionalController address of the new provisional controller
@@ -42,20 +45,39 @@ contract PassphraseControlled {
         uint256 unlockPeriod
     );
 
+    /// @notice logs when the provisionalUnlockDeposit is updated
+    /// @param provisionalUnlockDeposit the new value of provisionalUnlockDeposit
+    event ProvisionalUnlockDepositUpdated(
+        uint256 provisionalUnlockDeposit
+    );
+
+    /// @notice logs when the provisionalLockPeriod is updated
+    /// @param provisionalLockPeriod the new value of provisionalLockPeriod
+    event ProvisionalLockPeriodUpdated(
+        uint256 provisionalLockPeriod
+    );
+
     constructor(
         string memory _name,
         string memory _hint,
         bytes32 _passphraseHash,
-        uint256 _unlockPeriod
+        uint256 _unlockPeriod,
+        uint256 _provisionalLockPeriod,
+        uint256 _provisionalUnlockDeposit
     ) {
         require(_unlockPeriod > 0, "Unlock period must be > 0");
+        require(_provisionalLockPeriod > 0, "Provisional lock period must be > 0");
+
         name = _name;
         hint = _hint;
         passphraseHash = _passphraseHash;
         lockedAt = block.number;
+        provisionallyLockedUntil = block.number;
         controller = address(0x0000000000000000000000000000000000000000);
         provisionalController = address(0x0000000000000000000000000000000000000000);
         unlockPeriod = _unlockPeriod;
+        provisionalUnlockDeposit = _provisionalUnlockDeposit;
+        provisionalLockPeriod = _provisionalLockPeriod;
     }
 
     receive() external payable {}
@@ -71,12 +93,22 @@ contract PassphraseControlled {
     function provisionalUnlock(
         string memory _provisionalHint,
         bytes32 _provisionalPassphraseHash
-    ) public onlyLocked {
+    ) public payable onlyLocked {
+        // prevent passphrase re-use
         require(passphraseHash != _provisionalPassphraseHash, "Provisional passphrase same as current passphrase");
+
+        // cannot be provisionally unlocked while provisionally locked
+        // this prevents attackers from immediately taking provisional controller role from a legitimate user
+        require(provisionallyLockedUntil <= block.number, "Provisionally locked");
+        // this incurs a cost on DoS attack where attacker attempts to permanently assume provisional controller role
+        // the price paid to DoS attack will eventually be claimable by any address that is able to unlock the account
+        require(msg.value == provisionalUnlockDeposit, "Deposit required");
 
         provisionalController = msg.sender;
         provisionalHint = _provisionalHint;
         provisionalPassphraseHash = _provisionalPassphraseHash;
+        provisionallyLockedUntil = block.number + provisionalLockPeriod;
+
         emit ProvisionallyUnlocked(msg.sender, _provisionalHint, _provisionalPassphraseHash);
     }
 
@@ -135,6 +167,32 @@ contract PassphraseControlled {
         unlockPeriod = _unlockPeriod;
 
         emit UnlockPeriodUpdated(_unlockPeriod);
+    }
+
+    /// Set a new provisionalUnlockDeposit
+    /// @param _provisionalUnlockDeposit new provisionalUnlockDeposit value
+    /// @dev this can only be called by the controller while the account is unlocked
+    /// @dev emits ProvisionalUnlockDepositUpdated event
+    function setProvisionalUnlockDeposit(
+        uint256 _provisionalUnlockDeposit
+    ) public onlyControllerUnlocked {
+        provisionalUnlockDeposit = _provisionalUnlockDeposit;
+
+        emit ProvisionalUnlockDepositUpdated(_provisionalUnlockDeposit);
+    }
+
+    /// Set a new provisionalLockPeriod
+    /// @param _provisionalLockPeriod new provisionalLockPeriod value
+    /// @dev this can only be called by the controller while the account is unlocked
+    /// @dev emits ProvisionalLockPeriodUpdated event
+    function setProvisionalLockPeriod(
+        uint256 _provisionalLockPeriod
+    ) public onlyControllerUnlocked {
+        require(_provisionalLockPeriod > 0, "Provisional lock period must be > 0");
+
+        provisionalLockPeriod = _provisionalLockPeriod;
+
+        emit ProvisionalLockPeriodUpdated(_provisionalLockPeriod);
     }
 
     modifier onlyControllerUnlocked() {
